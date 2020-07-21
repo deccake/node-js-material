@@ -33,4 +33,11 @@ Deploy node app into production server do following:
 heroku keys:add
 
 //now  ssh keys is securly added into heroku account now you can trnasfer your code
+
+//create new app on heroku
 heroku create app-name
+
+//push code on herkou
+git push heroku master
+
+
