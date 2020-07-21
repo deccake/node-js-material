@@ -1,0 +1,21 @@
+//From cmd prompt select root project folder
+//initialised new git empty repository
+>git init
+
+//if you want to ignore some folder from project then create .gitignore 
+//file on root of project and add folder name in that
+
+//then 
+>git add .
+>git commit -m "description"
+
+
+//then add our remote url only first time
+>git add remote origin https://github.com/weather-app.git
+>git push -u origin master
+
+//now  onwords do any changes in file only we have to use
+>git status
+>git add .
+>git commit -m ""
+>git push
