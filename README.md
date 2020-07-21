@@ -18,3 +18,9 @@ ls -a -l ~/.ssh
  
  //add secure prevate key
   ssh-add  ~/.ssh/id_rsa
+
+//read content of you ssh file
+cat ~/.ssh/id_rsa.pub
+
+//test ssh connection
+ssh -T git@github.com
