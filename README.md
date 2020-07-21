@@ -24,3 +24,13 @@ cat ~/.ssh/id_rsa.pub
 
 //test ssh connection
 ssh -T git@github.com
+
+
+
+Deploy node app into production server do following:
+(Heroku)
+//from heroku cli search ssh keys and add
+heroku keys:add
+
+//now  ssh keys is securly added into heroku account now you can trnasfer your code
+heroku create app-name
