@@ -5,3 +5,16 @@
 
 
 SSH Key generateor cmd:  ssh-keygen -t rsa -b 4096 -C "amolw211@gmail.com"
+
+
+
+//using gitbash run following cmd to start communcation securely with server
+
+//search ssh file 
+ls -a -l ~/.ssh
+
+//enable ssh agent
+ eval "$(ssh-agent -s)"
+ 
+ //add secure prevate key
+  ssh-add  ~/.ssh/id_rsa
