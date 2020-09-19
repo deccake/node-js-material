@@ -11,7 +11,7 @@
 
 
 //then add our remote url only first time
->git add remote origin https://github.com/weather-app.git
+>git remote add origin https://github.com/weather-app.git
 >git push -u origin master
 
 //now  onwords do any changes in file only we have to use
