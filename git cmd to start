@@ -19,3 +19,10 @@
 >git add .
 >git commit -m ""
 >git push
+
+##display git username and email means find which username and email is set for this repo
+>git config --get user.name. git config --get user.email
+
+##set new username and email for git repo
+>git config --global user.name "FIRST_NAME LAST_NAME"
+>git config --global user.email "MY_NAME@example.com"
