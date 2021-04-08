@@ -1,0 +1,3853 @@
+/* 
+ *  @file events.service.ts
+ *  
+ *  (C) Copyright 2021 SmartAxiom,Inc All Rights Reserved
+ *  
+ *  SMARTAXIOM CONFIDENTIAL
+ *  The source code contained or described herein and all documents related to
+ *  the source code ("Material") are owned by SmartAxiom,Inc or its
+ *  suppliers or licensor's. Title to the Material remains with SmartAxiom, Inc
+ *  or its suppliers and licensor's. The Material contain trade secrets and proprietary
+ *  and confidential information of SmartAxiom or its suppliers and licensor's.
+ *  The Material is protected by worldwide copyright and trade secret laws and
+ *  treaty provisions. No part of the Material may be used, copied, reproduced, modified,
+ *  published, uploaded, posted,transmitted, distributed, or disclosed in any way without
+ *  SmartAxiom prior express written permission.
+ *  
+ *  No license under any patent, copyright, trade secret or other intellectual
+ *  property right is granted to or conferred upon you by disclosure or delivery
+ *  of the Materials, either expressly, by implication, inducement, estoppel or
+ *  otherwise. Any license under such intellectual property rights must be
+ *  express and approved by SmartAxiom in writing.
+ */
+
+import { WebSocketGateway, WebSocketServer, SubscribeMessage, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
+import { GlobalVariables, DB_CONNECTION } from 'src/constants/common.constants';
+import { Connection } from 'mongoose';
+import { IdentityChain } from 'src/schemas/identity-chain.entity';
+import { CommunicationChain } from 'src/schemas/communication-chain.entity';
+import { EdgeChain } from 'src/schemas/edge-chain.entity';
+import { Users } from 'src/schemas/users.entity';
+import { UserChain } from 'src/schemas/user-chain.entity';
+import moment = require('moment');
+import momentTz = require('moment-timezone');
+// import { CommunicationChain } from 'src/schemas/communication-graph.entity';
+
+
+@WebSocketGateway()
+export class EventsService implements OnGatewayConnection, OnGatewayDisconnect {
+
+  @WebSocketServer() server;
+  users = 0;
+  dbName = '';
+  clientDB;
+  dbConn;
+
+  async handleConnection(client) {
+    console.log("Socket conected!!", client.handshake.query.tenantName);
+    // this.dbName = this.genrateDbName(client.handshake.query.tenantName);
+    // this.clientDB = await this.createMongoDbConnection(this.dbName);
+    // DB_CONNECTION[client.handshake.query.tenantName] = await this.clientDB.db(this.dbName);
+  }
+
+  /**
+   * @description This method will listen to the requestEvents emit from browser
+   * @param client
+   * @param type
+   * @param params
+   */
+  @SubscribeMessage('requestEvents')
+  async requestEvents(client) {
+    try {
+      const eventList = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({ payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } });
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEventList', [connectionID, eventList]);
+    } catch (ex) {
+      if (ex)
+        console.error('Erroe while getting events', ex.message);
+    }
+  }
+
+  /**
+     * @description This method will listen to the requestSensorList emit from browser
+     * @param client
+     * @param type
+     * @param params
+     */
+
+   @SubscribeMessage('reciveSensorList')
+   async requestSensorList(client) {
+     try {
+       const eventList = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({ payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } });
+       if (eventList && eventList.length > 0) {
+         let uniqueSensorList = [];
+         eventList.filter((x) => {
+           if (x.payload && x.payload.indexOf('#') > -1 && x.payload.split('#')[0]) {
+             if (uniqueSensorList.indexOf(x.payload.split('#')[0]) == -1) {
+               uniqueSensorList.push(x.payload.split('#')[0]);
+             }
+           }
+           return uniqueSensorList
+         });
+         const connectionID = client.handshake.query.socketConnectionId;
+         this.server.emit('reciveSensorList', [connectionID, uniqueSensorList]);
+         // console.log("*****SensorList**********", uniqueSensorList);
+       }
+       else {
+         // console.log("*****No Sensor List Found**********");
+       }
+     }
+     catch (ex) {
+       console.error('Error while receiveEdgeChainCount ', ex.message)
+     }
+   }
+
+  /**
+     * @description This method will listen to the requestAvgEventDataSensorList emit from browser
+     * @param client
+     * @param type
+     * @param params
+     */
+  @SubscribeMessage('requestAvgEventDataSensorList')
+  async requestAvgEventDataSensorList(client, message) {
+    try{
+      const edgeToken = (message.edgeToken) ? message.edgeToken : '';
+      const endToken = (message.endToken) ? message.endToken : '';
+      let endCond: any = {};
+      let endByEdge: any[] = [];
+      if (endToken && endToken != "") {
+        endCond = { deviceToken: { $eq: endToken } }
+      } else if (edgeToken && edgeToken != "") {
+        endByEdge = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).distinct(
+          "data.token",
+          { "data.blSerialNumber": edgeToken });
+        if (endByEdge.length > 0) {
+          endCond = { deviceToken: { $in: endByEdge } }
+        } else {
+          endCond = { deviceToken: { $eq: "--" } }
+        }
+      } else {
+        endCond = { deviceToken: { $eq: "--" } }
+      }
+      const sensorList = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+        {
+          $match: {
+            $and:[
+              {payload: { $regex: RegExp(`${'.*#.*'}`, 'i') }},
+              endCond
+            ]
+          }
+        },
+        {
+          "$project": {
+            "id": 1,
+            "device": { "$arrayElemAt": [ { $split: [ "$payload", "#" ] }, 0 ] }
+          }
+        },
+        { $group: { _id: "$device" } },
+        { "$project": { "name": "$_id", "_id": false } },
+        { $sort: { "name": 1 } }
+      ]).toArray();
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('reciveAvgEventDataSensorList', [connectionID, sensorList]);
+    }
+    catch (ex) {
+      console.error('Error while reciveAvgEventDataSensorList ', ex.message)
+    }
+  }
+   
+  /**
+     * @description This method will listen to the requestEvnetDataSensorList emit from browser
+     * @param client
+     * @param type
+     * @param params
+     */
+  @SubscribeMessage('requestEventDataSensorList')
+  async requestEvnetDataSensorList(client, message) {
+    try{
+      const edgeToken = (message.edgeToken) ? message.edgeToken : '';
+      const endToken = (message.endToken) ? message.endToken : '';
+      let endCond: any = {};
+      let endByEdge: any[] = [];
+      if (endToken && endToken != "") {
+        endCond = { deviceToken: { $eq: endToken } }
+      } else if (edgeToken && edgeToken != "") {
+        endByEdge = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).distinct(
+          "data.token",
+          { "data.blSerialNumber": edgeToken });
+        if (endByEdge.length > 0) {
+          endCond = { deviceToken: { $in: endByEdge } }
+        } else {
+          endCond = { deviceToken: { $eq: "--" } }
+        }
+      } else {
+        endCond = { deviceToken: { $eq: "--" } }
+      }
+      const sensorList = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+        {
+          $match: {
+            $and:[
+              {payload: { $regex: RegExp(`${'.*#.*'}`, 'i') }},
+              endCond
+            ]
+          }
+        },
+        {
+          "$project": {
+            "id": 1,
+            "device": { "$arrayElemAt": [ { $split: [ "$payload", "#" ] }, 0 ] }
+          }
+        },
+        { $group: { _id: "$device" } },
+        { "$project": { "name": "$_id", "_id": false } },
+        { $sort: { "name": 1 } }
+      ]).toArray();
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('reciveEventDataSensorList', [connectionID, sensorList]);
+    }
+    catch (ex) {
+      console.error('Error while reciveEventDataSensorList ', ex.message)
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestEdgeChainCount emit from browser
+   * @param client
+   * @param type
+   * @param params
+   */
+  @SubscribeMessage('requestEdgeChainCount')
+  async requestEdgeChainCount(client) {
+    try {
+      const dataEdgeChainCount = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).find({ isModified: { $eq: 0 } });
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEdgeChainCount', [connectionID, dataEdgeChainCount.length]);
+    } catch (ex) {
+      if (ex)
+        console.error('Error while requesting edge', ex.message)
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestActiveEdgeCount emit from browser
+   * @param client
+   * @param type
+   * @param params
+   */
+  @SubscribeMessage('requestActiveEdgeCount')
+  async requestActiveEdgeCount(client) {
+    try {
+      const dataEdgeChainCount = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).find({
+        $and: [
+          { "data.active": { $in: [true, false] } },
+          { isModified: { $eq: 0 } },
+        ]
+      });
+      const activeCountData = dataEdgeChainCount.filter(edge => edge['data'].active === true);
+      const InactiveCountData = dataEdgeChainCount.filter(edge => edge['data'].active === false);
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveActiveEdgeCount', [connectionID, activeCountData.length, InactiveCountData.length]);
+    } catch (ex) {
+      if (ex)
+        console.error('Error while getting active edge count', ex.message);
+
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestEndPointCount emit from browser
+   * @param client
+   * @param type
+   * @param params
+   */
+  @SubscribeMessage('requestEndPointCount')
+  async requestEndPointCount(client) {
+    try {
+      const dataEndPointCount = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({ $and: [{ isModified: { $eq: 0 } }, { "data.active": { $in: [true, false] } }] });
+      const allCountData = await dataEndPointCount.filter(y => {
+        return !(y.data['isDeleted'] && (y.data['isDeleted'] == "true" || y.data['isDeleted'] == true))
+      });
+      const activeCountData = await allCountData.filter(endPoint => endPoint['data'].active === true);
+      const connectionID = client.handshake.query.socketConnectionId;
+      // DB_CONNECTION[client.handshake.query.tenantName].close();
+      this.server.emit('receiveEndPointCount', [connectionID, allCountData.length, activeCountData.length]);
+    } catch (ex) {
+      if (ex)
+        console.error('Error while getting end point count', ex.message);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestProvisionEndPointCount emit from browser
+   * @param client
+   * @param type
+   * @param params
+   */
+  @SubscribeMessage('requestProvisionEndPointCount')
+  async requestProvisionEndPointCount(client) {
+    try {
+      const dataEndPointCount = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({ $and: [{ isModified: { $eq: 0 } }, { "data.active": { $in: [false] } }] });
+      const countData = await dataEndPointCount.filter(y => {
+        return !(y.data['isDeleted'] && (y.data['isDeleted'] == "true" || y.data['isDeleted'] == true))
+      });
+      const connectionID = client.handshake.query.socketConnectionId;
+      // console.warn('** provision count ', countData.length)
+      // console.warn('** tenant conn name  ', DB_CONNECTION[client.handshake.query.tenantName]);
+      this.server.emit('receiveProvisionEndPointCount', [connectionID, countData.length]);
+    } catch (ex) {
+      console.error('Error while requesting provisioning end point count', ex.message);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestActiveEndPointCount emit from browser
+   * @param client
+   * @param type
+   * @param params
+   */
+  @SubscribeMessage('requestActiveEndPointCount')
+  async requestActiveEndPointCount(client) {
+    try {
+      const dataEndPointCount = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({ $and: [{ isModified: { $eq: 0 } }, { "data.active": { $in: [true] } }] });
+      const countData = await dataEndPointCount.filter(y => {
+        return !(y.data['isDeleted'] && (y.data['isDeleted'] == "true" || y.data['isDeleted'] == true))
+      });
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveActiveEndPointCount', [connectionID, countData.length]);
+    } catch (ex) {
+      if (ex)
+        console.error('Error while reuqesting active end poiny count', ex.message);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestActiveEndPointCount emit from browser
+   * @param client
+   * @param type
+   * @param params
+   */
+  @SubscribeMessage('requestEventCount')
+  async requestEventCount(client) {
+    try {
+      const dataEventCount = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({ payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } });
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEventCount', [connectionID, dataEventCount.length]);
+    } catch (ex) {
+      if (ex)
+        console.error('Error while request event count', ex.message);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestUserCount emit from browser
+   * @param client
+   */
+  @SubscribeMessage('requestUserCount')
+  async requestUserCount(client) {
+    try {
+      const activeUserCount = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(Users).findAndCount();
+      // return activeUserCount[1];
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveUserCount', [connectionID, activeUserCount[1]]);
+    } catch (ex) {
+      if (ex)
+        console.error('Error while request user count', ex.message);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestCounts emit from browser
+   * @param client
+   */
+  @SubscribeMessage('requestCounts')
+  async requestCounts(client) {
+    const event = { sensorName: "Temperature", sensorType: "Temperature", sensorData: "65", eventMessage: "65" };
+    const connectionID = client.handshake.query.socketConnectionId;
+    this.server.emit('receiveCount', [connectionID, event]);
+  }
+
+  /**
+   * @description This method will listen to the requestSparkLine emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestSparkLine')
+  async requestSparkLineData(client, message) {
+    const type = message.type;
+    const hourlyRecords = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const currentDate = new Date();
+    const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.GRAPH_DURATION * 60 * 60 * 1000);
+    if (type == 'user') {
+      let allUserChain: any
+      try {
+        allUserChain = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(UserChain).find({
+          $and: [
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Erroe while getting sparkline data', ex.message);
+      }
+      for (let i = 0; i < allUserChain.length; i++) {
+        const userChainDate = new Date(allUserChain[i].timestamp * 1000);
+        for (let j = 0; j < 24; j++) {
+          if (userChainDate.getHours() == j) {
+            hourlyRecords[j] = hourlyRecords[j] + 1;
+            break;
+          }
+        }
+
+      }
+      let filteredRecords;
+      if (hourlyRecords && hourlyRecords.length > 0) {
+        filteredRecords = hourlyRecords.slice(0, currentDate.getHours());
+      }
+      if (filteredRecords && filteredRecords.length) {
+        const returnArray = filteredRecords.slice((filteredRecords.length - 3), filteredRecords.length);
+        // return returnArray;
+        const connectionID = client.handshake.query.socketConnectionId;
+        this.server.emit('usersSparkline', [connectionID, returnArray]);
+      }
+
+    }
+    if (type == 'events') {
+      let allEventChain: any;
+      try {
+        allEventChain = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({
+          $and: [
+            { payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting events for sparkline data', ex.message);
+      }
+      for (let i = 0; i < allEventChain.length; i++) {
+        const eventChainDate = new Date(allEventChain[i].timeStamp * 1000);
+        if (currentDate.getFullYear() == eventChainDate.getFullYear() && currentDate.getMonth() == eventChainDate.getMonth() && currentDate.getDate() == eventChainDate.getDate()) {
+          for (let j = 0; j < 24; j++) {
+            if (eventChainDate.getHours() == j) {
+              hourlyRecords[j] = hourlyRecords[j] + 1;
+              break;
+            }
+          }
+        }
+
+      }
+      let filteredRecords;
+      if (hourlyRecords && hourlyRecords.length > 0) {
+        filteredRecords = hourlyRecords.slice(0, currentDate.getHours() + 1);
+      }
+      if (filteredRecords && filteredRecords.length) {
+        const returnArray = filteredRecords.slice((filteredRecords.length - 3), filteredRecords.length);
+        // return returnArray;
+        const connectionID = client.handshake.query.socketConnectionId;
+        this.server.emit('eventsSparkline', [connectionID, returnArray]);
+      }
+
+    }
+    if (type == 'activeEndpoints') {
+      let allEndPoints: any
+      try {
+        allEndPoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({
+          $and: [
+            { "data.active": { $eq: true } },
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting active endpoint data foe sparkline graph', ex.message);
+      }
+      // const currentDate = new Date();
+      for (let i = 0; i < allEndPoints.length; i++) {
+        const edgeDeviceDate = new Date(allEndPoints[i].timestamp * 1000);
+        if (!(allEndPoints[i].data['isDeleted'] && (allEndPoints[i].data['isDeleted'] == "true" || allEndPoints[i].data['isDeleted'] == true))) {
+          for (let j = 0; j < 24; j++) {
+            if (edgeDeviceDate.getHours() == j) {
+              hourlyRecords[j] = hourlyRecords[j] + 1;
+              break;
+            }
+          }
+        }
+      }
+      let filteredRecords;
+      if (hourlyRecords && hourlyRecords.length > 0) {
+        filteredRecords = hourlyRecords.slice(0, currentDate.getHours() + 1);
+      }
+      if (filteredRecords && filteredRecords.length) {
+        const returnArray = filteredRecords.slice((filteredRecords.length - 3), filteredRecords.length);
+        // return returnArray;
+        const connectionID = client.handshake.query.socketConnectionId;
+        this.server.emit('activeEndpointsSparkline', [connectionID, returnArray]);
+      }
+
+    }
+    if (type == 'provisioningQueue') {
+      let allEndPoints: any
+      try {
+        allEndPoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({
+          $and: [{ isModified: { $eq: 0 } }, { timestamp: { $gt: previousTimeStamp / 1000 } }, { "data.active": { $eq: false } }]
+        });
+      } catch (ex) {
+        if (ex)
+          console.log('Error while getting data for provisioning queue for graph', ex.message);
+      }
+      for (let i = 0; i < allEndPoints.length; i++) {
+        const edgeDeviceDate = new Date(allEndPoints[i].timestamp * 1000);
+        if (!(allEndPoints[i].data['isDeleted'] && (allEndPoints[i].data['isDeleted'] == "true" || allEndPoints[i].data['isDeleted'] == true))) {
+          for (let j = 0; j < 24; j++) {
+            if (edgeDeviceDate.getHours() == j) {
+              hourlyRecords[j] = hourlyRecords[j] + 1;
+              break;
+            }
+          }
+        }
+      }
+      let filteredRecords;
+      if (hourlyRecords && hourlyRecords.length > 0) {
+        filteredRecords = hourlyRecords.slice(0, currentDate.getHours() + 1);
+      }
+      if (filteredRecords && filteredRecords.length) {
+        const returnArray = filteredRecords.slice((filteredRecords.length - 3), filteredRecords.length);
+        // return returnArray;
+        const connectionID = client.handshake.query.socketConnectionId;
+        this.server.emit('provisioningQueueSparkline', [connectionID, returnArray]);
+      }
+
+    }
+    if (type == 'totalEndpoints') {
+      let allEndPoints: any
+      try {
+        allEndPoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({
+          $and: [{ isModified: { $eq: 0 } }, { timestamp: { $gt: previousTimeStamp / 1000 } }]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting total end points', ex.message);
+      }
+      for (let i = 0; i < allEndPoints.length; i++) {
+        const edgeDeviceDate = new Date(allEndPoints[i].timestamp * 1000);
+        if (!(allEndPoints[i].data['isDeleted'] && (allEndPoints[i].data['isDeleted'] == "true" || allEndPoints[i].data['isDeleted'] == true))) {
+          for (let j = 0; j < 24; j++) {
+            if (edgeDeviceDate.getHours() == j) {
+              hourlyRecords[j] = hourlyRecords[j] + 1;
+              break;
+            }
+          }
+        }
+      }
+      let filteredRecords;
+      if (hourlyRecords && hourlyRecords.length > 0) {
+        filteredRecords = hourlyRecords.slice(0, currentDate.getHours() + 1);
+      }
+      if (filteredRecords && filteredRecords.length) {
+        const returnArray = filteredRecords.slice((filteredRecords.length - 3), filteredRecords.length);
+        // return returnArray;
+        const connectionID = client.handshake.query.socketConnectionId;
+        this.server.emit('totalEndpointsSparkline', [connectionID, returnArray]);
+      }
+
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestEventByDuration emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestEventByDuration')
+  async requestEventByDuration(client, message) {
+    const duration = message.duration;
+    const DayArray = [0, 0, 0, 0, 0, 0, 0];
+    let weekArray = [];
+    const tzString = message.timeZone;
+    const currentDate = new Date();
+    const responseObj = {};
+    if (duration == 'hourly') {
+      const previousTimeStamp = (currentDate.getTime()) - ((GlobalVariables.HOURLY_DURATION) * 60 * 60 * 1000);
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEvent'] = JSON.parse(JSON.stringify(axisData[1]));
+      let allEvents: any
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $hour: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('error while getting event by duration for hourly', ex.message);
+          return false;
+        }
+      }
+      for (let i = 0; i < allEvents.length; i++) {
+        const hrs = allEvents[i].dateX; //(allEvents[i].dateX==0)?23:allEvents[i].dateX-1;
+        const hindex = responseObj['xAxis'].indexOf('' + hrs + ':00');
+        if (hindex !== -1) {
+          responseObj['ArrayEvent'][hindex] = (responseObj['ArrayEvent'][hindex] || responseObj['ArrayEvent'][hindex] == 0) ? responseObj['ArrayEvent'][hindex] + 1 : 1;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEventByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'daily') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any;
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEvent'] = JSON.parse(JSON.stringify(axisData[1]));
+      const previousTime = new Date(previousTimeStamp)
+      const dteTime = '' + previousTime.getFullYear() + (previousTime.getMonth() + 1 > 9 ? previousTime.getMonth() : '0' + Number(previousTime.getMonth() + 1)) + (previousTime.getDate() > 9 ? previousTime.getDate() : '0' + previousTime.getDate());
+
+      const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+      let allEventsHourlyData: any;
+      try {
+        allEventsHourlyData = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting sensor event data for hourly', ex.message);
+          return false;
+        }
+      }
+
+      for (let i = 0; i < allEventsHourlyData.length; i++) {
+        const hindex = responseObj['xAxis'].indexOf(outputArr[(allEventsHourlyData[i].dateX-1)]);
+        if (hindex !== -1) {
+          responseObj['ArrayEvent'][hindex] = (responseObj['ArrayEvent'][hindex] || responseObj['ArrayEvent'][hindex] == 0) ? responseObj['ArrayEvent'][hindex] + 1 : 0;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEventByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'weekly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any;
+
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEvent'] = JSON.parse(JSON.stringify(axisData[1]));
+      // let w1 = new Date(currentDate.getTime() - (21 * 24 * 60 * 60 * 1000));
+      // let w2 = new Date(currentDate.getTime() - (14 * 24 * 60 * 60 * 1000));
+      // let w3 = new Date(currentDate.getTime() - (7 * 24 * 60 * 60 * 1000));
+      // let w4 = new Date(currentDate.getTime());
+
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $week: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting sensor event data for daily', ex.message);
+      }
+      // const eventBySensor = allEvents.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      // const eventBySensor = allEvents;
+      // weekArray = [0,0,0,0];
+      // for (let i = 0; i < eventBySensor.length; i++) {
+      //   const hourValue = new Date(eventBySensor[i].timeStamp * 1000);
+      //   if (hourValue < w1 ) {
+      //     weekArray[0] = weekArray[0] + 1;
+      //   } else if (hourValue < w2) {
+      //     weekArray[1] = weekArray[1] + 1;
+      //   } else if (hourValue < w3) {
+      //     weekArray[2] = weekArray[2] + 1;
+      //   } else if (hourValue <= w4) {
+      //     weekArray[3] = weekArray[3] + 1;
+      //   }
+      // }
+
+      for (let i = 0; i < allEvents.length; i++) {
+        const hindex = responseObj['xAxis'].indexOf(allEvents[i].dateX);
+        if (hindex !== -1) {
+          responseObj['ArrayEvent'][hindex] = (responseObj['ArrayEvent'][hindex] || responseObj['ArrayEvent'][hindex] == 0) ? responseObj['ArrayEvent'][hindex] + 1 : 0;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEventByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'dailyBkp') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({
+          $and: [
+            { payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } },
+            { timeStamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('error while getting event by duration for daily', ex.message);
+      }
+      for (let i = 0; i < allEvents.length; i++) {
+        const hourValue = new Date(allEvents[i].timeStamp * 1000);
+        if (currentDate.getFullYear() == hourValue.getFullYear() && currentDate.getMonth() == hourValue.getMonth() && currentDate.getDate() >= hourValue.getDate() && (currentDate.getDate() - 7) < hourValue.getDate()) {
+          if (hourValue.getDay() == 1)
+            DayArray[0] = DayArray[0] + 1;
+          else if (hourValue.getDay() == 2)
+            DayArray[1] = DayArray[1] + 1;
+          else if (hourValue.getDay() == 3)
+            DayArray[2] = DayArray[2] + 1;
+          else if (hourValue.getDay() == 4)
+            DayArray[3] = DayArray[3] + 1;
+          else if (hourValue.getDay() == 5)
+            DayArray[4] = DayArray[4] + 1;
+          else if (hourValue.getDay() == 6)
+            DayArray[5] = DayArray[5] + 1;
+          else if (hourValue.getDay() == 7)
+            DayArray[6] = DayArray[6] + 1;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEventByDuration', [connectionID, DayArray]);
+    }
+    else if (duration == 'weeklyBkp') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any;
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({
+          $and: [
+            { payload: { $regex: RegExp(`${'.*#.*'}`, 'i') } },
+            { timeStamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('error while getting event by duration for weekly', ex.message);
+      }
+      const dayInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();//this.daysInMonth(currentDate.getMonth(), currentDate.getFullYear());
+      const date = new Date(currentDate.getFullYear() + '' + '-' + (currentDate.getMonth() + 1) + '' + '-' + dayInMonth + '');
+      const adjustedDate = date.getDate() + date.getDay();
+      const prefixes = ['0', '1', '2', '3', '4', '5'];
+      const weekNumber = parseInt(prefixes[0 | adjustedDate / 7]);
+      weekArray = [];
+      for (let i = 0; i < weekNumber; i++) {
+        weekArray.push(0);
+      }
+      for (let i = 0; i < allEvents.length; i++) {
+        const recordDate = new Date(allEvents[i].timeStamp * 1000);
+        if (recordDate.getFullYear() == date.getFullYear() && recordDate.getMonth() == date.getMonth() && recordDate.getDate() < date.getDate()) {
+          if (recordDate.getDate() > 0 && recordDate.getDate() <= 7) {
+            weekArray[0] = weekArray[0] + 1;
+          } else if (recordDate.getDate() > 7 && recordDate.getDate() <= 14) {
+            weekArray[1] = weekArray[1] + 1;
+          } else if (recordDate.getDate() > 14 && recordDate.getDate() <= 21) {
+            weekArray[2] = weekArray[2] + 1;
+          } else if (recordDate.getDate() > 21 && recordDate.getDate() <= 28) {
+            weekArray[3] = weekArray[3] + 1;
+          } else if (recordDate.getDate() > 28) {
+            weekArray[4] = weekArray[4] + 1;
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveEventByDuration', [connectionID, weekArray]);
+    }
+  }
+
+  getXAxis(previousTimeStamp, duration) {
+    let xaxis = [];
+    let defaultValue = [];
+    // let hh = ((previousTimeStamp.getHours()>9) ? previousTimeStamp.getHours():"0"+previousTimeStamp.getHours());
+    // let mm = ((previousTimeStamp.getMinutes()>9) ? previousTimeStamp.getMinutes():"0"+previousTimeStamp.getMinutes());
+    // let dt = ((previousTimeStamp.getDate()>9) ? previousTimeStamp.getDate():"0"+previousTimeStamp.getDate());
+    // let mt = ((previousTimeStamp.getMonth()>8) ? previousTimeStamp.getMonth() + 1:"0"+(previousTimeStamp.getMonth()+1));
+    // let dateStr =  dt + "-" + mt + "-" + previousTimeStamp.getFullYear()+" "+hh+":"+mm;
+    // let date = momentTz.tz(dateStr, "DD-MM-YYYY HH:mm", tzString);
+    // console.log("date=>", previousTimeStamp);
+    if (duration == 'hourly') {
+      let hour = previousTimeStamp.getHours() + 1;
+      for (let i = 0; i <= 23; i++) {
+        xaxis.push('' + hour + ':00');
+        defaultValue.push(0);
+        if (hour == 23) {
+          hour = 0;
+        } else {
+          hour++;
+        }
+      }
+      return [xaxis, defaultValue];
+    }
+    else if (duration == 'daily') {
+      let day = previousTimeStamp.getDay();
+      // let day = moment(date).day();
+      day++;
+      const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      for (let i = 0; i < 7; i++) {
+        xaxis.push(outputArr[day]);
+        defaultValue.push(0);
+        if (day == 6) {
+          day = 0;
+        } else {
+          day++;
+        }
+      }
+      return [xaxis, defaultValue]
+    }
+    else {
+      const dt = ((previousTimeStamp.getDate() > 9) ? previousTimeStamp.getDate() : "0" + previousTimeStamp.getDate());
+      const mt = ((previousTimeStamp.getMonth() > 8) ? previousTimeStamp.getMonth() + 1 : "0" + (previousTimeStamp.getMonth() + 1));
+      const date = dt + "-" + mt + "-" + previousTimeStamp.getFullYear();
+      let week = moment(date, "DD-MM-YYYY").week();
+      return [[week, week + 1, week + 2, week + 3], [0, 0, 0, 0]]
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestDeviceByDurationBKP emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestDeviceByDurationBKP')
+  async requestDeviceByDurationBKP(client, message) {
+    const duration = message.duration;
+    const responseObj = {
+
+    }
+    const tzString = message.timeZone;
+    // const currentDate = new Date(new Date().toLocaleString("en-US", {timeZone: tzString}));
+    const currentDate = new Date();
+    if (duration == 'hourly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.HOURLY_DURATION * 60 * 60 * 1000);
+      let allEndpoints = [];
+      let allEdgeDevices = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['endXAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({
+          $and: [
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).find({
+          $and: [
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting device by duration for hourly', ex.message);
+          return false;
+        }
+      }
+
+      for (let i = 0; i < allEndpoints.length; i++) {
+        const hourValue = new Date(allEndpoints[i].timestamp * 1000);
+        if (!(allEndpoints[i].data['isDeleted'] && (allEndpoints[i].data['isDeleted'] == "true" || allEndpoints[i].data['isDeleted'] == true))) {
+          let hour = hourValue.getHours();
+          const hindex = responseObj['endXAxis'].indexOf('' + hour + ':00');
+          if (hindex !== -1) {
+            responseObj['ArrayEnd'][hindex] = (responseObj['ArrayEnd'][hindex] || responseObj['ArrayEnd'][hindex] == 0) ? responseObj['ArrayEnd'][hindex] + 1 : 0;
+          }
+          if (hourValue.getHours() > new Date().getHours()) {
+            break;
+          }
+        }
+      }
+
+      for (let i = 0; i < allEdgeDevices.length; i++) {
+        const hourValue = new Date(allEdgeDevices[i].timestamp * 1000);
+        let hour = hourValue.getHours();
+        const hindex = responseObj['endXAxis'].indexOf('' + hour + ':00');
+        if (hindex !== -1) {
+          responseObj['ArrayEdge'][hindex] = (responseObj['ArrayEdge'][hindex] || responseObj['ArrayEdge'][hindex] == 0) ? responseObj['ArrayEdge'][hindex] + 1 : 0;
+        }
+        if (hourValue.getHours() > new Date().getHours()) {
+          break;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'daily') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      let allEndpoints = [];
+      let allEdgeDevices = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['dayAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+      const arrayEnd = JSON.parse(JSON.stringify(axisData[1]));
+      const arrayEdge = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({
+          $and: [
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).find({
+          $and: [
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting device by duration for daily', ex.message);
+      }
+      for (let i = 0; i < allEndpoints.length; i++) {
+        const hourValue = new Date(allEndpoints[i].timestamp * 1000);
+        if (!(allEndpoints[i].data['isDeleted'] && (allEndpoints[i].data['isDeleted'] == "true" || allEndpoints[i].data['isDeleted'] == true))) {
+          const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+          const current = new Date().getDay();
+          responseObj['xAxisArr'] = [];
+          for (let i = 6; i >= 0; i--) {
+            let a = current - i >= 0 ? current - i : 7 + (current - i);
+            responseObj['xAxisArr'].push(outputArr[a])
+          }
+          responseObj['xAxisArr'].forEach((day, indx, arr) => {
+            if (outputArr[hourValue.getDay()] == day) {
+              arrayEnd[indx] = arrayEnd[indx] ? arrayEnd[indx] : 0;
+              arrayEnd[indx] = arrayEnd[indx] + 1;
+            } else {
+              arrayEnd.push(0);
+            }
+          })
+        }
+      }
+
+      for (let i = 0; i < allEdgeDevices.length; i++) {
+        const hourValue = new Date(allEdgeDevices[i].timestamp * 1000);
+        const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        // const dayIndex = [0, 1, 2, 3, 4, 5, 6];
+        const current = new Date().getDay();
+        responseObj['xAxisArr'] = [];
+        for (let i = 6; i >= 0; i--) {
+          let a = current - i >= 0 ? current - i : 7 + (current - i);
+          responseObj['xAxisArr'].push(outputArr[a])
+        }
+        responseObj['xAxisArr'].forEach((day, indx, arr) => {
+          if (outputArr[hourValue.getDay()] == day) {
+            arrayEdge[indx] = arrayEdge[indx] ? arrayEdge[indx] : 0;
+            arrayEdge[indx] = arrayEdge[indx] + 1;
+          } else {
+            arrayEdge.push(0);
+          }
+        })
+      }
+      responseObj['ArrayEnd'] = arrayEnd;
+      responseObj['ArrayEdge'] = arrayEdge;
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'weekly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['weekAxis'] = axisData[0];
+      const arrayEnd = axisData[1];
+      const arrayEdge = axisData[1];
+      let allEndpoints = [];
+      let allEdgeDevices = [];
+      try {
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).find({
+          $and: [
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).find({
+          $and: [
+            { isModified: { $eq: 0 } },
+            { timestamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting device by duration for daily', ex.message);
+      }
+
+      for (let i = 0; i < allEndpoints.length; i++) {
+        const recordDate = new Date(allEndpoints[i].timestamp * 1000);
+        if (!(allEndpoints[i].data['isDeleted'] && (allEndpoints[i].data['isDeleted'] == "true" || allEndpoints[i].data['isDeleted'] == true))) {
+          if (recordDate.getDate() > 0 && recordDate.getDate() <= 7) {
+            arrayEnd[0] = arrayEnd[0] + 1;
+          } else if (recordDate.getDate() > 7 && recordDate.getDate() <= 14) {
+            arrayEnd[1] = arrayEnd[1] + 1;
+          } else if (recordDate.getDate() > 14 && recordDate.getDate() <= 21) {
+            arrayEnd[2] = arrayEnd[2] + 1;
+          } else if (recordDate.getDate() > 21 && recordDate.getDate() <= 28) {
+            arrayEnd[3] = arrayEnd[3] + 1;
+          } else if (recordDate.getDate() > 28) {
+            arrayEnd[4] = arrayEnd[4] + 1;
+          }
+        }
+      }
+
+      for (let i = 0; i < allEdgeDevices.length; i++) {
+        const recordDate = new Date(allEdgeDevices[i].timestamp * 1000);
+        // if (recordDate.getFullYear() == date.getFullYear() && recordDate.getMonth() == date.getMonth() && recordDate.getDate() < date.getDate()) {
+        if (recordDate.getDate() > 0 && recordDate.getDate() <= 7) {
+          arrayEdge[0] = arrayEdge[0] + 1;
+        } else if (recordDate.getDate() > 7 && recordDate.getDate() <= 14) {
+          arrayEdge[1] = arrayEdge[1] + 1;
+        } else if (recordDate.getDate() > 14 && recordDate.getDate() <= 21) {
+          arrayEdge[2] = arrayEdge[2] + 1;
+        } else if (recordDate.getDate() > 21 && recordDate.getDate() <= 28) {
+          arrayEdge[3] = arrayEdge[3] + 1;
+        } else if (recordDate.getDate() > 28) {
+          arrayEdge[4] = arrayEdge[4] + 1;
+        }
+        // }
+      }
+
+      responseObj['ArrayEnd'] = arrayEnd;
+      responseObj['ArrayEdge'] = arrayEdge;
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestAverageSensorData emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestAverageSensorData')
+  async requestAverageSensorData(client, message) {
+    const duration = message.duration;
+    const sensorType = message.sensorType;
+    const DayArray: any = [0, 0, 0, 0, 0, 0, 0];
+    const countDayArray = [0, 0, 0, 0, 0, 0, 0];
+    let todaysValueSum = 0;
+    let weekArray = [];
+    const countWeekArray = [0, 0, 0, 0, 0];
+    let responseObj = {};
+    const tzString = message.timeZone;
+    console.log("tzString", tzString);
+    const currentDate = new Date();
+    if (duration == 'hourly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.HOURLY_DURATION * 60 * 60 * 1000);
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEventCount'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEventValue'] = JSON.parse(JSON.stringify(axisData[1]));
+      let eventByEndPoint: any;
+      try {
+        eventByEndPoint = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $hour: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting average sensor data', ex.message);
+          return false;
+        }
+      }
+      // const eventBySensor = eventByEndPoint.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      const eventBySensor = eventByEndPoint;
+
+      for (let i = 0; i < eventBySensor.length; i++) {
+        // const hourValue = new Date(eventBySensor[i].timeStamp * 1000);
+        // let hour = hourValue.getHours();
+        // const hindex = responseObj['endXAxis'].indexOf(''+hour+':00');
+        const hindex = responseObj['xAxis'].indexOf('' + eventBySensor[i].dateX + ':00');
+        const payloadArray = eventBySensor[i]['payload'].split('#');
+        if (hindex !== -1) {
+          responseObj['ArrayEventValue'][hindex] = (responseObj['ArrayEventValue'][hindex] || responseObj['ArrayEventValue'][hindex] == 0) ? responseObj['ArrayEventValue'][hindex] + Number(payloadArray[1]) : Number(payloadArray[1]);
+          responseObj['ArrayEventCount'][hindex] = (responseObj['ArrayEventCount'][hindex] || responseObj['ArrayEventCount'][hindex] == 0) ? responseObj['ArrayEventCount'][hindex] + 1 : 0;
+        }
+      }
+
+      for (let k = 0; k < responseObj['ArrayEventValue'].length; k++) {
+        if (responseObj['ArrayEventValue'][k]) {
+          responseObj['ArrayEventValue'][k] = (responseObj['ArrayEventValue'][k] / responseObj['ArrayEventCount'][k]).toFixed(2);
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, responseObj]);
+    }
+    else if (duration == 'daily') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEventCount'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEventValue'] = JSON.parse(JSON.stringify(axisData[1]));
+      let allEventsHourlyData: any;
+      try {
+        allEventsHourlyData = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting sensor event data for hourly', ex.message);
+          return false;
+        }
+      }
+      // const eventBySensor = allEvents.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      // const eventBySensorHourlyData = allEventsHourlyData;
+      for (let i = 0; i < allEventsHourlyData.length; i++) {
+        // const hourValue = new Date(eventBySensorHourlyData[i].timeStamp * 1000);
+        // const hindex = responseObj['xAxis'].indexOf(outputArr[hourValue.getDay()]);
+        const hindex = responseObj['xAxis'].indexOf(outputArr[allEventsHourlyData[i].dateX]);
+        const payloadArray = allEventsHourlyData[i]['payload'].split('#');
+        if (hindex !== -1) {
+          responseObj['ArrayEventValue'][hindex] = (responseObj['ArrayEventValue'][hindex] || responseObj['ArrayEventValue'][hindex] == 0) ? responseObj['ArrayEventValue'][hindex] + Number(payloadArray[1]) : Number(payloadArray[1]);
+          responseObj['ArrayEventCount'][hindex] = (responseObj['ArrayEventCount'][hindex] || responseObj['ArrayEventCount'][hindex] == 0) ? responseObj['ArrayEventCount'][hindex] + 1 : 0;
+        }
+      }
+
+      for (let k = 0; k < responseObj['ArrayEventValue'].length; k++) {
+        if (responseObj['ArrayEventValue'][k]) {
+          responseObj['ArrayEventValue'][k] = (responseObj['ArrayEventValue'][k] / responseObj['ArrayEventCount'][k]).toFixed(2);
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, responseObj]);
+    }
+    else if (duration == 'weekly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any;
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEventCount'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEventValue'] = JSON.parse(JSON.stringify(axisData[1]));
+      // let w1 = new Date(currentDate.getTime() - (21 * 24 * 60 * 60 * 1000));
+      // let w2 = new Date(currentDate.getTime() - (14 * 24 * 60 * 60 * 1000));
+      // let w3 = new Date(currentDate.getTime() - (7 * 24 * 60 * 60 * 1000));
+      // let w4 = new Date(currentDate.getTime());
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $week: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting sensor event data for daily', ex.message);
+      }
+      // const eventBySensor = allEvents.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      // const eventBySensor = allEvents;
+      // weekArray = [0,0,0,0];
+      // for (let i = 0; i < eventBySensor.length; i++) {
+      //   const hourValue = new Date(eventBySensor[i].timeStamp * 1000);
+      //   const payloadArray = eventBySensor[i]['payload'].split('#');
+
+      //   if (hourValue < w1 ) {
+      //     weekArray[1] = weekArray[1] + Number(payloadArray[1]);
+      //     countWeekArray[1] = countWeekArray[1] + 1;
+      //   } if (hourValue < w2 ) {
+      //     weekArray[1] = weekArray[1] + Number(payloadArray[1]);
+      //     countWeekArray[1] = countWeekArray[1] + 1;
+      //   } else if (hourValue < w3 ) {
+      //     weekArray[2] = weekArray[2] + Number(payloadArray[1]);
+      //     countWeekArray[2] = countWeekArray[2] + 1;
+      //   } else if (hourValue <= w4 ) {
+      //     weekArray[3] = weekArray[3] + Number(payloadArray[1]);
+      //     countWeekArray[3] = countWeekArray[3] + 1;
+      //   }
+      // }
+
+      // for (let k = 0; k < countWeekArray.length; k++) {
+      //   if (weekArray[k])
+      //     weekArray[k] = (weekArray[k] / countWeekArray[k]).toFixed(2);
+      // }
+
+      for (let i = 0; i < allEvents.length; i++) {
+        const hindex = responseObj['xAxis'].indexOf(allEvents[i].dateX);
+        const payloadArray = allEvents[i]['payload'].split('#');
+        if (hindex !== -1) {
+          responseObj['ArrayEventValue'][hindex] = (responseObj['ArrayEventValue'][hindex] || responseObj['ArrayEventValue'][hindex] == 0) ? responseObj['ArrayEventValue'][hindex] + Number(payloadArray[1]) : Number(payloadArray[1]);
+          responseObj['ArrayEventCount'][hindex] = (responseObj['ArrayEventCount'][hindex] || responseObj['ArrayEventCount'][hindex] == 0) ? responseObj['ArrayEventCount'][hindex] + 1 : 0;
+        }
+      }
+
+      for (let k = 0; k < responseObj['ArrayEventValue'].length; k++) {
+        if (responseObj['ArrayEventValue'][k]) {
+          responseObj['ArrayEventValue'][k] = (responseObj['ArrayEventValue'][k] / responseObj['ArrayEventCount'][k]).toFixed(2);
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, responseObj]);
+    }
+    else if (duration == 'dailyBkp') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      let eventByEndPoint: any
+      try {
+        eventByEndPoint = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({
+          $and: [
+            { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+            { timeStamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting average sensor data for daily', ex.message);
+      }
+      // const eventBySensor = eventByEndPoint.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      const eventBySensor = eventByEndPoint;
+
+      for (let i = 0; i < eventBySensor.length; i++) {
+        const hourValue = new Date(eventBySensor[i].timeStamp * 1000);
+        if (currentDate.getFullYear() == hourValue.getFullYear() && currentDate.getMonth() == hourValue.getMonth() && currentDate.getDate() >= hourValue.getDate() && (currentDate.getDate() - 7) < hourValue.getDate()) {
+          if (hourValue.getDay() == 1) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            DayArray[0] = parseInt(payloadArray[1]) + DayArray[0];
+            countDayArray[0] = countDayArray[0] + 1;
+          } else if (hourValue.getDay() == 2) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            DayArray[1] = parseInt(payloadArray[1]) + DayArray[1];
+            countDayArray[1] = countDayArray[1] + 1;
+          } else if (hourValue.getDay() == 3) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            DayArray[2] = parseInt(payloadArray[1]) + DayArray[2];
+            countDayArray[2] = countDayArray[2] + 1;
+          } else if (hourValue.getDay() == 4) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            DayArray[3] = parseInt(payloadArray[1]) + DayArray[3];
+            countDayArray[3] = countDayArray[3] + 1;
+          } else if (hourValue.getDay() == 5) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            DayArray[4] = parseInt(payloadArray[1]) + DayArray[4];
+            countDayArray[4] = countDayArray[4] + 1;
+          } else if (hourValue.getDay() == 6) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            DayArray[5] = parseInt(payloadArray[1]) + DayArray[5];
+            countDayArray[5] = countDayArray[5] + 1;
+          } else if (hourValue.getDay() == 7) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            DayArray[6] = parseInt(payloadArray[1]) + DayArray[6];
+            countDayArray[6] = countDayArray[6] + 1;
+          }
+        }
+      }
+      for (let k = 0; k < DayArray.length; k++) {
+        if (countDayArray[k])
+          DayArray[k] = (DayArray[k] / countDayArray[k]).toFixed(2);
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, DayArray]);
+    }
+    else if (duration == 'weeklyBkp') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let eventByEndPoint: any
+      try {
+        eventByEndPoint = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({
+          $and: [
+            { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+            { timeStamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting average sensor data for weekly', ex.message);
+      }
+      // const eventBySensor = eventByEndPoint.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      const eventBySensor = eventByEndPoint;
+
+      const dayInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();//this.daysInMonth(currentDate.getMonth(), currentDate.getFullYear());
+      const date = new Date(currentDate.getFullYear() + '' + '-' + (currentDate.getMonth() + 1) + '' + '-' + dayInMonth + '');
+      const adjustedDate = date.getDate() + date.getDay();
+      const prefixes = ['0', '1', '2', '3', '4', '5'];
+      const weekNumber = parseInt(prefixes[0 | adjustedDate / 7]);
+      weekArray = [];
+      for (let i = 0; i < weekNumber; i++) {
+        weekArray.push(0);
+      }
+      for (let i = 0; i < eventBySensor.length; i++) {
+        const recordDate = new Date(eventBySensor[i].timeStamp * 1000);
+        if (recordDate.getFullYear() == date.getFullYear() && recordDate.getMonth() == date.getMonth() && recordDate.getDate() < date.getDate()) {
+          if (recordDate.getDate() > 0 && recordDate.getDate() <= 7) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            weekArray[0] = parseInt(payloadArray[1]) + weekArray[0];
+            countWeekArray[0] = countWeekArray[0] + 1
+          } else if (recordDate.getDate() > 7 && recordDate.getDate() <= 14) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            weekArray[1] = parseInt(payloadArray[1]) + weekArray[1];
+            countWeekArray[1] = countWeekArray[1] + 1
+          } else if (recordDate.getDate() > 14 && recordDate.getDate() <= 21) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            weekArray[2] = parseInt(payloadArray[1]) + weekArray[2];
+            countWeekArray[2] = countWeekArray[2] + 1
+          } else if (recordDate.getDate() > 21 && recordDate.getDate() <= 28) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            weekArray[3] = parseInt(payloadArray[1]) + weekArray[3];
+            countWeekArray[3] = countWeekArray[3] + 1
+          } else if (recordDate.getDate() > 28) {
+            const payloadArray = eventBySensor[i]['payload'].split('#');
+            weekArray[4] = parseInt(payloadArray[1]) + weekArray[4];
+            countWeekArray[4] = countWeekArray[4] + 1
+          }
+        }
+      }
+      for (let k = 0; k < weekArray.length; k++) {
+        if (countWeekArray[k])
+          weekArray[k] = (weekArray[k] / countWeekArray[k]).toFixed(2);
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, weekArray]);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestDeviceByDuration emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestDeviceByDuration')
+  async requestDeviceByDuration(client, message) {
+    const duration = message.duration;
+    const responseObj = {}
+    const tzString = message.timeZone;
+    const currentDate = new Date();
+    if (duration == 'hourly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.HOURLY_DURATION * 60 * 60 * 1000);
+      let allEndpoints = [];
+      let allEndpointsOld = [];
+      let allEdgeDevices = [];
+      let allEdgeDevicesOld = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['endXAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        // Old Data-
+        allEndpointsOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.deviceUUID",
+              "endPoints": {
+                "$push": {
+                  "active": "$data.active",
+                  "deviceUUID": "$data.deviceUUID",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "deviceUUID": "$_id",
+              "_id": false,
+              "endPoint": { "$arrayElemAt": ["$endPoints", 0] },
+            }
+          },
+          {
+            $match: { "endPoint.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$endPoint.timestamp',
+              "ds": '$endPoint.active',
+              "endPoint": "$deviceUUID"
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevicesOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.serialNumber",
+              "edges": {
+                "$push": {
+                  "active": "$data.active",
+                  "serialNumber": "$data.serialNumber",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "serialNumber": "$_id",
+              "_id": false,
+              "edge": { "$arrayElemAt": ["$edges", 0] },
+            }
+          },
+          {
+            $match: { "edge.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$edge.timestamp',
+              "ds": '$edge.active',
+              "edge": "$serialNumber"
+            }
+          }
+        ]).toArray();
+
+        // Daily data-
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "timestamp": 1,
+              "ds": "$data.active",
+              "hours": { $hour: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "endPoint": "$data.deviceUUID"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "hours": "$hours",
+                "endPoint": "$endPoint"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.hours",
+              "endPoints": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "deviceUUID": "$_id.endPoint",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "hours": "$_id",
+              "_id": false,
+              "endPoints": "$endPoints",
+              "count": 1
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timestamp": 1,
+              "ds": "$data.active",
+              "hours": { $hour: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "edge": "$data.serialNumber"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "hours": "$hours",
+                "edge": "$edge"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.hours",
+              "edges": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "serialNumber": "$_id.edge",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "hours": "$_id",
+              "_id": false,
+              "edges": "$edges",
+              "count": 1
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting device by duration for hourly', ex.message);
+          return false;
+        }
+      }
+      let activeEndPointCount = allEndpointsOld.length;
+      let allEndpointsOldDeviceUUID = [];
+      if (allEndpointsOld.length) {
+        allEndpointsOldDeviceUUID = allEndpointsOld.map(({ endPoint }) => endPoint);
+      }
+      responseObj['ArrayEnd'] = responseObj['ArrayEnd'].map(item => {
+        return activeEndPointCount;
+      });
+
+      if (allEndpoints && allEndpoints.length > 0) {
+        for (let i = 0; i < allEndpoints.length; i++) {
+          const hrs = allEndpoints[i].hours; //(allEndpoints[i].hours==0)?23:allEndpoints[i].hours-1;
+          const hindex = responseObj['endXAxis'].indexOf('' + hrs + ':00');
+          // const hindex = responseObj['endXAxis'].indexOf('' + allEndpoints[i].hours + ':00');
+          if (hindex !== -1) {
+            allEndpoints[i].endPoints.filter((endPoint) => {
+              if (allEndpointsOldDeviceUUID.includes(endPoint.deviceUUID)) {
+                if (endPoint.active === false) {
+                  activeEndPointCount--;
+                }
+              } else {
+                if (endPoint.active === true) {
+                  allEndpointsOldDeviceUUID.push(endPoint.serialNumber);
+                  activeEndPointCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['endXAxis'].length; n++) {
+              responseObj['ArrayEnd'][n] = activeEndPointCount;
+            }
+          }
+        }
+      }
+
+      // Edge Count
+      let activeEdgeCount = allEdgeDevicesOld.length;
+      let allEdgeDevicesOldSerialNumber = [];
+      if (allEdgeDevicesOld.length) {
+        allEdgeDevicesOldSerialNumber = allEdgeDevicesOld.map(({ edge }) => edge);
+      }
+      responseObj['ArrayEdge'] = responseObj['ArrayEdge'].map(item => {
+        return activeEdgeCount;
+      });
+
+      if (allEdgeDevices && allEdgeDevices.length > 0) {
+        for (let i = 0; i < allEdgeDevices.length; i++) {
+          const hrs = allEdgeDevices[i].hours; //(allEdgeDevices[i].hours==0)?23:allEdgeDevices[i].hours-1;
+          const hindex = responseObj['endXAxis'].indexOf('' + hrs + ':00');
+          // const hindex = responseObj['endXAxis'].indexOf('' + allEdgeDevices[i].hours + ':00');
+          if (hindex !== -1) {
+            allEdgeDevices[i].edges.filter((edge) => {
+              if (allEdgeDevicesOldSerialNumber.includes(edge.serialNumber)) {
+                if (edge.active === false) {
+                  activeEdgeCount--;
+                }
+              } else {
+                if (edge.active === true) {
+                  allEdgeDevicesOldSerialNumber.push(edge.serialNumber);
+                  activeEdgeCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['endXAxis'].length; n++) {
+              responseObj['ArrayEdge'][n] = activeEdgeCount;
+            }
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'daily') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      let allEndpoints = [];
+      let allEndpointsOld = [];
+      let allEdgeDevices = [];
+      let allEdgeDevicesOld = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['dayAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        // Old Data-
+        allEndpointsOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.deviceUUID",
+              "endPoints": {
+                "$push": {
+                  "active": "$data.active",
+                  "deviceUUID": "$data.deviceUUID",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "deviceUUID": "$_id",
+              "_id": false,
+              "endPoint": { "$arrayElemAt": ["$endPoints", 0] },
+            }
+          },
+          {
+            $match: { "endPoint.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$endPoint.timestamp',
+              "ds": '$endPoint.active',
+              "endPoint": "$deviceUUID"
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevicesOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.serialNumber",
+              "edges": {
+                "$push": {
+                  "active": "$data.active",
+                  "serialNumber": "$data.serialNumber",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "serialNumber": "$_id",
+              "_id": false,
+              "edge": { "$arrayElemAt": ["$edges", 0] },
+            }
+          },
+          {
+            $match: { "edge.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$edge.timestamp',
+              "ds": '$edge.active',
+              "edge": "$serialNumber"
+            }
+          }
+        ]).toArray();
+
+        // Daily data-
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "timestamp": 1,
+              "ds": "$data.active",
+              "days": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "endPoint": "$data.deviceUUID"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "days": "$days",
+                "endPoint": "$endPoint"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.days",
+              "endPoints": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "deviceUUID": "$_id.endPoint",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "days": "$_id",
+              "_id": false,
+              "endPoints": "$endPoints",
+              "count": 1
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timestamp": 1,
+              "ds": "$data.active",
+              "days": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "edge": "$data.serialNumber"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "days": "$days",
+                "edge": "$edge"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.days",
+              "edges": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "serialNumber": "$_id.edge",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "days": "$_id",
+              "_id": false,
+              "edges": "$edges",
+              "count": 1
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting device by duration for hourly', ex.message);
+          return false;
+        }
+      }
+      let activeEndPointCount = allEndpointsOld.length;
+      let allEndpointsOldDeviceUUID = [];
+      if (allEndpointsOld.length) {
+        allEndpointsOldDeviceUUID = allEndpointsOld.map(({ endPoint }) => endPoint);
+      }
+      responseObj['ArrayEnd'] = responseObj['ArrayEnd'].map(item => {
+        return activeEndPointCount;
+      });
+      if (allEndpoints && allEndpoints.length > 0) {
+        for (let i = 0; i < allEndpoints.length; i++) {
+          const hindex = responseObj['dayAxis'].indexOf(outputArr[(allEndpoints[i].days-1)]);
+          if (hindex !== -1) {
+            allEndpoints[i].endPoints.filter((endPoint) => {
+              if (allEndpointsOldDeviceUUID.includes(endPoint.deviceUUID)) {
+                if (endPoint.active === false) {
+                  activeEndPointCount--;
+                }
+              } else {
+                if (endPoint.active === true) {
+                  allEndpointsOldDeviceUUID.push(endPoint.serialNumber);
+                  activeEndPointCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['dayAxis'].length; n++) {
+              responseObj['ArrayEnd'][n] = activeEndPointCount;
+            }
+          }
+        }
+      }
+
+      // Edge Count
+      let activeEdgeCount = allEdgeDevicesOld.length;
+      let allEdgeDevicesOldSerialNumber = [];
+      if (allEdgeDevicesOld.length) {
+        allEdgeDevicesOldSerialNumber = allEdgeDevicesOld.map(({ edge }) => edge);
+      }
+      responseObj['ArrayEdge'] = responseObj['ArrayEdge'].map(item => {
+        return activeEdgeCount;
+      });
+
+      if (allEdgeDevices && allEdgeDevices.length > 0) {
+        for (let i = 0; i < allEdgeDevices.length; i++) {
+          const hindex = responseObj['dayAxis'].indexOf(outputArr[(allEdgeDevices[i].days-1)]);
+          if (hindex !== -1) {
+            allEdgeDevices[i].edges.filter((edge) => {
+              if (allEdgeDevicesOldSerialNumber.includes(edge.serialNumber)) {
+                if (edge.active === false) {
+                  activeEdgeCount--;
+                }
+              } else {
+                if (edge.active === true) {
+                  allEdgeDevicesOldSerialNumber.push(edge.serialNumber);
+                  activeEdgeCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['dayAxis'].length; n++) {
+              responseObj['ArrayEdge'][n] = activeEdgeCount;
+            }
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'weekly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let allEndpoints = [];
+      let allEndpointsOld = [];
+      let allEdgeDevices = [];
+      let allEdgeDevicesOld = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['weekAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        // Old Data-
+        allEndpointsOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.deviceUUID",
+              "endPoints": {
+                "$push": {
+                  "active": "$data.active",
+                  "deviceUUID": "$data.deviceUUID",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "deviceUUID": "$_id",
+              "_id": false,
+              "endPoint": { "$arrayElemAt": ["$endPoints", 0] },
+            }
+          },
+          {
+            $match: { "endPoint.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$endPoint.timestamp',
+              "ds": '$endPoint.active',
+              "endPoint": "$deviceUUID"
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevicesOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.serialNumber",
+              "edges": {
+                "$push": {
+                  "active": "$data.active",
+                  "serialNumber": "$data.serialNumber",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "serialNumber": "$_id",
+              "_id": false,
+              "edge": { "$arrayElemAt": ["$edges", 0] },
+            }
+          },
+          {
+            $match: { "edge.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$edge.timestamp',
+              "ds": '$edge.active',
+              "edge": "$serialNumber"
+            }
+          }
+        ]).toArray();
+
+        // Daily data-
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "timestamp": 1,
+              "ds": "$data.active",
+              "weeknos": { $week: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "endPoint": "$data.deviceUUID"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "weeknos": "$weeknos",
+                "endPoint": "$endPoint"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.weeknos",
+              "endPoints": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "deviceUUID": "$_id.endPoint",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "weeknos": "$_id",
+              "_id": false,
+              "endPoints": "$endPoints",
+              "count": 1
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timestamp": 1,
+              "ds": "$data.active",
+              "weeknos": { $week: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "edge": "$data.serialNumber"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "weeknos": "$weeknos",
+                "edge": "$edge"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.weeknos",
+              "edges": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "serialNumber": "$_id.edge",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "weeknos": "$_id",
+              "_id": false,
+              "edges": "$edges",
+              "count": 1
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting device by duration for hourly', ex.message);
+          return false;
+        }
+      }
+
+      // End Point count
+      let activeEndPointCount = allEndpointsOld.length;
+      let allEndpointsOldDeviceUUID = [];
+      if (allEndpointsOld.length) {
+        allEndpointsOldDeviceUUID = allEndpointsOld.map(({ endPoint }) => endPoint);
+      }
+      responseObj['ArrayEnd'] = responseObj['ArrayEnd'].map(item => {
+        return activeEndPointCount;
+      });
+
+      if (allEndpoints && allEndpoints.length > 0) {
+        for (let i = 0; i < allEndpoints.length; i++) {
+          const hindex = responseObj['weekAxis'].indexOf((allEndpoints[i].weeknos));
+          // console.log("weekAxis", responseObj['weekAxis'], allEndpoints[i].weeknos);
+          if (hindex !== -1) {
+            allEndpoints[i].endPoints.filter((endPoint) => {
+              if (allEndpointsOldDeviceUUID.includes(endPoint.deviceUUID)) {
+                if (endPoint.active === false) {
+                  activeEndPointCount--;
+                }
+              } else {
+                if (endPoint.active === true) {
+                  allEndpointsOldDeviceUUID.push(endPoint.serialNumber);
+                  activeEndPointCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['weekAxis'].length; n++) {
+              responseObj['ArrayEnd'][n] = activeEndPointCount;
+            }
+          }
+        }
+      }
+
+      // Edge Count
+      let activeEdgeCount = allEdgeDevicesOld.length;
+      let allEdgeDevicesOldSerialNumber = [];
+      if (allEdgeDevicesOld.length) {
+        allEdgeDevicesOldSerialNumber = allEdgeDevicesOld.map(({ edge }) => edge);
+      }
+      responseObj['ArrayEdge'] = responseObj['ArrayEdge'].map(item => {
+        return activeEdgeCount;
+      });
+
+      if (allEdgeDevices && allEdgeDevices.length > 0) {
+        for (let i = 0; i < allEdgeDevices.length; i++) {
+          const hindex = responseObj['weekAxis'].indexOf((allEdgeDevices[i].weeknos));
+          if (hindex !== -1) {
+            allEdgeDevices[i].edges.filter((edge) => {
+              if (allEdgeDevicesOldSerialNumber.includes(edge.serialNumber)) {
+                if (edge.active === false) {
+                  activeEdgeCount--;
+                }
+              } else {
+                if (edge.active === true) {
+                  allEdgeDevicesOldSerialNumber.push(edge.serialNumber);
+                  activeEdgeCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['weekAxis'].length; n++) {
+              responseObj['ArrayEdge'][n] = activeEdgeCount;
+            }
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+  }
+  /**
+   * @description This method will listen to the requestDeviceByDurationFromCommunicationChain emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestDeviceByDurationFromCommunicationChain')
+  async requestDeviceByDurationFromCommunicationChain(client, message) {
+    const duration = message.duration;
+    const responseObj = {}
+    const tzString = message.timeZone;
+    const currentDate = new Date();
+    if (duration == 'hourly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.HOURLY_DURATION * 60 * 60 * 1000);
+      let allEndpoints = [];
+      let allEndpointsOld = [];
+      let allEdgeDevices = [];
+      let allEdgeDevicesOld = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['endXAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        // Old Data-
+        allEndpointsOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.deviceUUID",
+              "endPoints": {
+                "$push": {
+                  "active": "$data.active",
+                  "deviceUUID": "$data.deviceUUID",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "deviceUUID": "$_id",
+              "_id": false,
+              "endPoint": { "$arrayElemAt": ["$endPoints", 0] },
+            }
+          },
+          {
+            $match: { "endPoint.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$endPoint.timestamp',
+              "ds": '$endPoint.active',
+              "endPoint": "$deviceUUID"
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevicesOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { 
+              $and: [
+                { "timeStamp": { $lte: previousTimeStamp / 1000 } },
+                { payload: { "$regex": ".*\\$.*", "$options": "i" } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "deviceUUID":1,
+              "timeStamp": 1,
+              "active": { "$arrayElemAt": [{ $split: ["$payload", {$literal: "$"}] }, 1] },
+              "online": { "$arrayElemAt": [{ $split: ["$payload", {$literal: "$"}] }, 3] }
+            }
+          },
+          {
+            $group: {
+              "_id": "$deviceUUID",
+              "edges": {
+                "$push": {
+                  "active": "$active",
+                  "serialNumber": "$deviceUUID",
+                  "timestamp": "$timeStamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "serialNumber": "$_id",
+              "_id": false,
+              "edge": { "$arrayElemAt": ["$edges", 0] },
+            }
+          },
+          {
+            $match: { "edge.active": { $eq: "true" } }
+          },
+          {
+            "$project": {
+              "timestamp": '$edge.timestamp',
+              "ds": '$edge.active',
+              "edge": "$serialNumber"
+            }
+          }
+        ]).toArray();
+
+        // Daily data-
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "timestamp": 1,
+              "ds": "$data.active",
+              "hours": { $hour: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "endPoint": "$data.deviceUUID"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "hours": "$hours",
+                "endPoint": "$endPoint"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.hours",
+              "endPoints": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "deviceUUID": "$_id.endPoint",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "hours": "$_id",
+              "_id": false,
+              "endPoints": "$endPoints",
+              "count": 1
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { 
+              $and: [
+                { "timeStamp": { $gt: previousTimeStamp / 1000 } },
+                { payload: { "$regex": ".*\\$.*", "$options": "i" } }
+              ]
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timestamp": "$timeStamp",
+              "ds": { "$arrayElemAt": [{ $split: ["$payload", {$literal: "$"}] }, 1] },
+              "online": { "$arrayElemAt": [{ $split: ["$payload", {$literal: "$"}] }, 3] },
+              "hours": { $hour: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+              "edge": "$deviceUUID"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "hours": "$hours",
+                "edge": "$edge"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.hours",
+              "edges": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "serialNumber": "$_id.edge",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "hours": "$_id",
+              "_id": false,
+              "edges": "$edges",
+              "count": 1
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting device by duration for hourly', ex.message);
+          return false;
+        }
+      }
+      let activeEndPointCount = allEndpointsOld.length;
+      let allEndpointsOldDeviceUUID = [];
+      if (allEndpointsOld.length) {
+        allEndpointsOldDeviceUUID = allEndpointsOld.map(({ endPoint }) => endPoint);
+      }
+      responseObj['ArrayEnd'] = responseObj['ArrayEnd'].map(item => {
+        return activeEndPointCount;
+      });
+
+      if (allEndpoints && allEndpoints.length > 0) {
+        for (let i = 0; i < allEndpoints.length; i++) {
+          const hrs = allEndpoints[i].hours; //(allEndpoints[i].hours==0)?23:allEndpoints[i].hours-1;
+          const hindex = responseObj['endXAxis'].indexOf('' + hrs + ':00');
+          // const hindex = responseObj['endXAxis'].indexOf('' + allEndpoints[i].hours + ':00');
+          if (hindex !== -1) {
+            allEndpoints[i].endPoints.filter((endPoint) => {
+              if (allEndpointsOldDeviceUUID.includes(endPoint.deviceUUID)) {
+                if (endPoint.active === false) {
+                  activeEndPointCount--;
+                }
+              } else {
+                if (endPoint.active === true) {
+                  allEndpointsOldDeviceUUID.push(endPoint.serialNumber);
+                  activeEndPointCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['endXAxis'].length; n++) {
+              responseObj['ArrayEnd'][n] = activeEndPointCount;
+            }
+          }
+        }
+      }
+
+      // Edge Count
+      let activeEdgeCount = allEdgeDevicesOld.length;
+      let allEdgeDevicesOldSerialNumber = [];
+      if (allEdgeDevicesOld.length) {
+        allEdgeDevicesOldSerialNumber = allEdgeDevicesOld.map(({ edge }) => edge);
+      }
+      responseObj['ArrayEdge'] = responseObj['ArrayEdge'].map(item => {
+        return activeEdgeCount;
+      });
+
+      if (allEdgeDevices && allEdgeDevices.length > 0) {
+        for (let i = 0; i < allEdgeDevices.length; i++) {
+          const hrs = allEdgeDevices[i].hours; //(allEdgeDevices[i].hours==0)?23:allEdgeDevices[i].hours-1;
+          const hindex = responseObj['endXAxis'].indexOf('' + hrs + ':00');
+          // const hindex = responseObj['endXAxis'].indexOf('' + allEdgeDevices[i].hours + ':00');
+          if (hindex !== -1) {
+            allEdgeDevices[i].edges.filter((edge) => {
+              if (allEdgeDevicesOldSerialNumber.includes(edge.serialNumber)) {
+                if (edge.active === "false") {
+                  activeEdgeCount--;
+                }
+              } else {
+                if (edge.active === "true") {
+                  allEdgeDevicesOldSerialNumber.push(edge.serialNumber);
+                  activeEdgeCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['endXAxis'].length; n++) {
+              responseObj['ArrayEdge'][n] = activeEdgeCount;
+            }
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'daily') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      let allEndpoints = [];
+      let allEndpointsOld = [];
+      let allEdgeDevices = [];
+      let allEdgeDevicesOld = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['dayAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        // Old Data-
+        allEndpointsOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.deviceUUID",
+              "endPoints": {
+                "$push": {
+                  "active": "$data.active",
+                  "deviceUUID": "$data.deviceUUID",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "deviceUUID": "$_id",
+              "_id": false,
+              "endPoint": { "$arrayElemAt": ["$endPoints", 0] },
+            }
+          },
+          {
+            $match: { "endPoint.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$endPoint.timestamp',
+              "ds": '$endPoint.active',
+              "endPoint": "$deviceUUID"
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevicesOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.serialNumber",
+              "edges": {
+                "$push": {
+                  "active": "$data.active",
+                  "serialNumber": "$data.serialNumber",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "serialNumber": "$_id",
+              "_id": false,
+              "edge": { "$arrayElemAt": ["$edges", 0] },
+            }
+          },
+          {
+            $match: { "edge.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$edge.timestamp',
+              "ds": '$edge.active',
+              "edge": "$serialNumber"
+            }
+          }
+        ]).toArray();
+
+        // Daily data-
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "timestamp": 1,
+              "ds": "$data.active",
+              "days": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "endPoint": "$data.deviceUUID"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "days": "$days",
+                "endPoint": "$endPoint"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.days",
+              "endPoints": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "deviceUUID": "$_id.endPoint",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "days": "$_id",
+              "_id": false,
+              "endPoints": "$endPoints",
+              "count": 1
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timestamp": 1,
+              "ds": "$data.active",
+              "days": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "edge": "$data.serialNumber"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "days": "$days",
+                "edge": "$edge"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.days",
+              "edges": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "serialNumber": "$_id.edge",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "days": "$_id",
+              "_id": false,
+              "edges": "$edges",
+              "count": 1
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting device by duration for hourly', ex.message);
+          return false;
+        }
+      }
+      let activeEndPointCount = allEndpointsOld.length;
+      let allEndpointsOldDeviceUUID = [];
+      if (allEndpointsOld.length) {
+        allEndpointsOldDeviceUUID = allEndpointsOld.map(({ endPoint }) => endPoint);
+      }
+      responseObj['ArrayEnd'] = responseObj['ArrayEnd'].map(item => {
+        return activeEndPointCount;
+      });
+      if (allEndpoints && allEndpoints.length > 0) {
+        for (let i = 0; i < allEndpoints.length; i++) {
+          const hindex = responseObj['dayAxis'].indexOf(outputArr[(allEndpoints[i].days-1)]);
+          if (hindex !== -1) {
+            allEndpoints[i].endPoints.filter((endPoint) => {
+              if (allEndpointsOldDeviceUUID.includes(endPoint.deviceUUID)) {
+                if (endPoint.active === false) {
+                  activeEndPointCount--;
+                }
+              } else {
+                if (endPoint.active === true) {
+                  allEndpointsOldDeviceUUID.push(endPoint.serialNumber);
+                  activeEndPointCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['dayAxis'].length; n++) {
+              responseObj['ArrayEnd'][n] = activeEndPointCount;
+            }
+          }
+        }
+      }
+
+      // Edge Count
+      let activeEdgeCount = allEdgeDevicesOld.length;
+      let allEdgeDevicesOldSerialNumber = [];
+      if (allEdgeDevicesOld.length) {
+        allEdgeDevicesOldSerialNumber = allEdgeDevicesOld.map(({ edge }) => edge);
+      }
+      responseObj['ArrayEdge'] = responseObj['ArrayEdge'].map(item => {
+        return activeEdgeCount;
+      });
+
+      if (allEdgeDevices && allEdgeDevices.length > 0) {
+        for (let i = 0; i < allEdgeDevices.length; i++) {
+          const hindex = responseObj['dayAxis'].indexOf(outputArr[(allEdgeDevices[i].days-1)]);
+          if (hindex !== -1) {
+            allEdgeDevices[i].edges.filter((edge) => {
+              if (allEdgeDevicesOldSerialNumber.includes(edge.serialNumber)) {
+                if (edge.active === false) {
+                  activeEdgeCount--;
+                }
+              } else {
+                if (edge.active === true) {
+                  allEdgeDevicesOldSerialNumber.push(edge.serialNumber);
+                  activeEdgeCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['dayAxis'].length; n++) {
+              responseObj['ArrayEdge'][n] = activeEdgeCount;
+            }
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+    else if (duration == 'weekly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let allEndpoints = [];
+      let allEndpointsOld = [];
+      let allEdgeDevices = [];
+      let allEdgeDevicesOld = [];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['weekAxis'] = axisData[0];
+      responseObj['ArrayEnd'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEdge'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        // Old Data-
+        allEndpointsOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.deviceUUID",
+              "endPoints": {
+                "$push": {
+                  "active": "$data.active",
+                  "deviceUUID": "$data.deviceUUID",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "deviceUUID": "$_id",
+              "_id": false,
+              "endPoint": { "$arrayElemAt": ["$endPoints", 0] },
+            }
+          },
+          {
+            $match: { "endPoint.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$endPoint.timestamp',
+              "ds": '$endPoint.active',
+              "endPoint": "$deviceUUID"
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevicesOld = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: { "timestamp": { $lte: previousTimeStamp / 1000 } }
+          },
+          {
+            $group: {
+              "_id": "$data.serialNumber",
+              "edges": {
+                "$push": {
+                  "active": "$data.active",
+                  "serialNumber": "$data.serialNumber",
+                  "timestamp": "$data.timestamp"
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "serialNumber": "$_id",
+              "_id": false,
+              "edge": { "$arrayElemAt": ["$edges", 0] },
+            }
+          },
+          {
+            $match: { "edge.active": { $eq: true } }
+          },
+          {
+            "$project": {
+              "timestamp": '$edge.timestamp',
+              "ds": '$edge.active',
+              "edge": "$serialNumber"
+            }
+          }
+        ]).toArray();
+
+        // Daily data-
+        allEndpoints = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "timestamp": 1,
+              "ds": "$data.active",
+              "weeknos": { $week: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "endPoint": "$data.deviceUUID"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "weeknos": "$weeknos",
+                "endPoint": "$endPoint"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.weeknos",
+              "endPoints": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "deviceUUID": "$_id.endPoint",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "weeknos": "$_id",
+              "_id": false,
+              "endPoints": "$endPoints",
+              "count": 1
+            }
+          }
+        ]).toArray();
+
+        allEdgeDevices = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(EdgeChain).aggregate([
+          {
+            $sort: {
+              timestamp: -1,
+              _id: -1
+            }
+          },
+          {
+            $match: {
+              timestamp: { $gt: previousTimeStamp / 1000 }
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timestamp": 1,
+              "ds": "$data.active",
+              "weeknos": { $week: { date: { $toDate: { $multiply: ["$timestamp", 1000] } }, timezone: tzString } },
+              "edge": "$data.serialNumber"
+            }
+          },
+          {
+            "$group": {
+              "_id": {
+                "weeknos": "$weeknos",
+                "edge": "$edge"
+              },
+              "activeCount": {
+                "$sum": 1
+              },
+              "activeFirst": {
+                "$first": "$ds"
+              }
+            }
+          },
+          {
+            "$group": {
+              "_id": "$_id.weeknos",
+              "edges": {
+                "$push": {
+                  "active": "$activeFirst",
+                  "serialNumber": "$_id.edge",
+                  "count": "$activeCount"
+                },
+
+              },
+              "count": {
+                "$sum": "$activeCount"
+              }
+            }
+          },
+          {
+            "$sort": {
+              "count": -1
+            }
+          },
+          {
+            "$project": {
+              "weeknos": "$_id",
+              "_id": false,
+              "edges": "$edges",
+              "count": 1
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting device by duration for hourly', ex.message);
+          return false;
+        }
+      }
+
+      // End Point count
+      let activeEndPointCount = allEndpointsOld.length;
+      let allEndpointsOldDeviceUUID = [];
+      if (allEndpointsOld.length) {
+        allEndpointsOldDeviceUUID = allEndpointsOld.map(({ endPoint }) => endPoint);
+      }
+      responseObj['ArrayEnd'] = responseObj['ArrayEnd'].map(item => {
+        return activeEndPointCount;
+      });
+
+      if (allEndpoints && allEndpoints.length > 0) {
+        for (let i = 0; i < allEndpoints.length; i++) {
+          const hindex = responseObj['weekAxis'].indexOf((allEndpoints[i].weeknos));
+          // console.log("weekAxis", responseObj['weekAxis'], allEndpoints[i].weeknos);
+          if (hindex !== -1) {
+            allEndpoints[i].endPoints.filter((endPoint) => {
+              if (allEndpointsOldDeviceUUID.includes(endPoint.deviceUUID)) {
+                if (endPoint.active === false) {
+                  activeEndPointCount--;
+                }
+              } else {
+                if (endPoint.active === true) {
+                  allEndpointsOldDeviceUUID.push(endPoint.serialNumber);
+                  activeEndPointCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['weekAxis'].length; n++) {
+              responseObj['ArrayEnd'][n] = activeEndPointCount;
+            }
+          }
+        }
+      }
+
+      // Edge Count
+      let activeEdgeCount = allEdgeDevicesOld.length;
+      let allEdgeDevicesOldSerialNumber = [];
+      if (allEdgeDevicesOld.length) {
+        allEdgeDevicesOldSerialNumber = allEdgeDevicesOld.map(({ edge }) => edge);
+      }
+      responseObj['ArrayEdge'] = responseObj['ArrayEdge'].map(item => {
+        return activeEdgeCount;
+      });
+
+      if (allEdgeDevices && allEdgeDevices.length > 0) {
+        for (let i = 0; i < allEdgeDevices.length; i++) {
+          const hindex = responseObj['weekAxis'].indexOf((allEdgeDevices[i].weeknos));
+          if (hindex !== -1) {
+            allEdgeDevices[i].edges.filter((edge) => {
+              if (allEdgeDevicesOldSerialNumber.includes(edge.serialNumber)) {
+                if (edge.active === false) {
+                  activeEdgeCount--;
+                }
+              } else {
+                if (edge.active === true) {
+                  allEdgeDevicesOldSerialNumber.push(edge.serialNumber);
+                  activeEdgeCount++;
+                }
+              }
+            });
+            for (let n = hindex; n < responseObj['weekAxis'].length; n++) {
+              responseObj['ArrayEdge'][n] = activeEdgeCount;
+            }
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveDeviceByDuration', [connectionID, responseObj]);
+    }
+  }
+  /**
+   * @description This method will listen to the requestMovingAverageSensorData emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestMovingAverageSensorData')
+  async requestMovingAverageSensorData(client, message) {
+    const duration = message.duration;
+    const sensorType = message.sensorType;
+    const edgeToken = message.edgeToken;
+    const endToken = message.endToken;
+    let endCond:any = {};
+    let endByEdge:any[] = [];
+    if(endToken && endToken!=""){
+      endCond = { deviceToken: { $eq: endToken } }
+    } else if(edgeToken && edgeToken!=""){
+      endByEdge = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).distinct(
+        "data.token",
+        { "data.blSerialNumber": edgeToken } );
+      if(endByEdge.length>0){
+        endCond = { deviceToken: { $in: endByEdge } }
+      } else{
+        endCond = { deviceToken: { $eq: "--" } }
+      }
+    }
+    let weekArray = [];
+    const countWeekArray = [0, 0, 0, 0, 0];
+    let responseObj = {};
+    const tzString = message.timeZone;
+    const currentDate = new Date();
+    if (duration == 'hourly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.HOURLY_DURATION * 60 * 60 * 1000);
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEventCount'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEventValue'] = JSON.parse(JSON.stringify(axisData[1]));
+      let eventBySensor: any[];
+      const lLimt = GlobalVariables.HOURLY_MOVING_GRAPH - 1;
+      try {
+        eventBySensor = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } },
+                endCond
+              ]
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timeStamp": 1,
+              "tme": { $toDate: { $multiply: ["$timeStamp", 1000] } },
+              "hours": { $hour: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+              "val": { $toDouble: { "$arrayElemAt": [{ $split: ["$payload", "#"] }, 3] } },
+              "device": { "$arrayElemAt": [{ $split: ["$payload", "#"] }, 0] }
+            }
+          },
+          {
+            $sort: {
+              timeStamp: -1
+            }
+          },
+          {
+            $group: {
+              _id: "$hours",
+              prx: {
+                $push: {
+                  v: "$val",
+                  t: "$timeStamp",
+                  d: "$tme"
+                }
+              }
+            }
+          },
+          { $project: { prx: { $slice: ["$prx", GlobalVariables.HOURLY_MOVING_GRAPH] } } },
+          {
+            $addFields: {
+              numDays: GlobalVariables.HOURLY_MOVING_GRAPH,
+              startDate: { $arrayElemAt: ["$prx.d", 0] }
+            }
+          },
+          {
+            $addFields: {
+              "prx": {
+                $map: {
+                  input: { $range: [0, { $subtract: [{ $size: "$prx" }, lLimt] }] },
+                  as: "z",
+                  in: {
+                    avg: { $avg: { $slice: ["$prx.v", "$$z", GlobalVariables.HOURLY_MOVING_GRAPH] } },
+                    d: { $arrayElemAt: ["$prx.d", { $add: ["$$z", lLimt] }] },
+                    t: { $arrayElemAt: ["$prx.t", { $add: ["$$z", lLimt] }] }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "hoursVal": "$_id",
+              "movingAvg": { "$arrayElemAt": ["$prx", 0] },
+              "_id": false
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting m average sensor data', ex.message);
+          return false;
+        }
+      }
+      if (eventBySensor && eventBySensor.length > 0) {
+        for (let i = 0; i < eventBySensor.length; i++) {
+          const hrs = eventBySensor[i].hoursVal; //(eventBySensor[i].hoursVal==0)?23:eventBySensor[i].hoursVal-1;
+          const hindex = responseObj['xAxis'].indexOf('' + hrs + ':00');
+          // const hindex = responseObj['xAxis'].indexOf('' + eventBySensor[i].hoursVal + ':00');
+          if(hindex !==-1 && eventBySensor[i].movingAvg)
+            responseObj['ArrayEventValue'][hindex] = eventBySensor[i].movingAvg.avg;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, responseObj]);
+    }
+    else if (duration == 'daily') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEventCount'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEventValue'] = JSON.parse(JSON.stringify(axisData[1]));
+      let eventBySensor: any;
+      const lLimt = GlobalVariables.MONTHLY_MOVING_GRAPH - 1;
+      try {
+        eventBySensor = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } },
+                endCond
+              ]
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timeStamp": 1,
+              "tme": { $toDate: { $multiply: ["$timeStamp", 1000] } },
+              "days": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+              "val": { $toDouble: { "$arrayElemAt": [{ $split: ["$payload", "#"] }, 3] } },
+              "device": { "$arrayElemAt": [{ $split: ["$payload", "#"] }, 0] }
+            }
+          },
+          {
+            $sort: {
+              timeStamp: -1
+            }
+          },
+          {
+            $group: {
+              _id: "$days",
+              prx: {
+                $push: {
+                  v: "$val",
+                  t: "$timeStamp",
+                  d: "$tme"
+                }
+              }
+            }
+          },
+          { $project: { prx: { $slice: ["$prx", GlobalVariables.MONTHLY_MOVING_GRAPH] } } },
+          {
+            $addFields: {
+              numDays: GlobalVariables.MONTHLY_MOVING_GRAPH,
+              startDate: { $arrayElemAt: ["$prx.d", 0] }
+            }
+          },
+          {
+            $addFields: {
+              "prx": {
+                $map: {
+                  input: { $range: [0, { $subtract: [{ $size: "$prx" }, lLimt] }] },
+                  as: "z",
+                  in: {
+                    avg: { $avg: { $slice: ["$prx.v", "$$z", GlobalVariables.MONTHLY_MOVING_GRAPH] } },
+                    d: { $arrayElemAt: ["$prx.d", { $add: ["$$z", lLimt] }] },
+                    t: { $arrayElemAt: ["$prx.t", { $add: ["$$z", lLimt] }] }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "daysVal": "$_id",
+              "movingAvg": { "$arrayElemAt": ["$prx", 0] },
+              "_id": false
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting sensor event data for hourly', ex.message);
+          return false;
+        }
+      }
+      if (eventBySensor && eventBySensor.length > 0) {
+        for (let i = 0; i < eventBySensor.length; i++) {
+          const hindex = responseObj['xAxis'].indexOf(outputArr[(eventBySensor[i].daysVal-1)]);
+          if(hindex !==-1 && eventBySensor[i].movingAvg)
+            responseObj['ArrayEventValue'][hindex] = eventBySensor[i].movingAvg.avg;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, responseObj]);
+    }
+    else if (duration == 'weekly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let eventBySensor: any;
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEventCount'] = JSON.parse(JSON.stringify(axisData[1]));
+      responseObj['ArrayEventValue'] = JSON.parse(JSON.stringify(axisData[1]));
+      const lLimt = GlobalVariables.WEEKLY_MOVING_GRAPH - 1;
+      try {
+        eventBySensor = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } },
+                endCond
+              ]
+            }
+          },
+          {
+            "$project": {
+              "id": 1,
+              "timeStamp": 1,
+              "tme": { $toDate: { $multiply: ["$timeStamp", 1000] } },
+              "weeknos": { $week: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+              "val": { $toDouble: { "$arrayElemAt": [{ $split: ["$payload", "#"] }, 3] } },
+              "device": { "$arrayElemAt": [{ $split: ["$payload", "#"] }, 0] }
+            }
+          },
+          {
+            $sort: { timeStamp: -1 }
+          },
+          {
+            $group: {
+              _id: "$weeknos",
+              prx: {
+                $push: {
+                  v: "$val",
+                  t: "$timeStamp",
+                  d: "$tme"
+                }
+              }
+            }
+          },
+          { $project: { prx: { $slice: ["$prx", GlobalVariables.WEEKLY_MOVING_GRAPH] } } },
+          {
+            $addFields: {
+              numDays: GlobalVariables.WEEKLY_MOVING_GRAPH,
+              startDate: { $arrayElemAt: ["$prx.d", 0] }
+            }
+          },
+          {
+            $addFields: {
+              "prx": {
+                $map: {
+                  input: { $range: [0, { $subtract: [{ $size: "$prx" }, lLimt] }] },
+                  as: "z",
+                  in: {
+                    avg: { $avg: { $slice: ["$prx.v", "$$z", GlobalVariables.WEEKLY_MOVING_GRAPH] } },
+                    d: { $arrayElemAt: ["$prx.d", { $add: ["$$z", lLimt] }] },
+                    t: { $arrayElemAt: ["$prx.t", { $add: ["$$z", lLimt] }] }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$project": {
+              "weekVal": "$_id",
+              "movingAvg": { "$arrayElemAt": ["$prx", 0] },
+              "_id": false
+            }
+          }
+        ]).toArray();
+        // console.log("weekVal", eventBySensor[0]);
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting sensor event data for daily', ex.message);
+      }
+      if (eventBySensor && eventBySensor.length > 0) {
+        for (let i = 0; i < eventBySensor.length; i++) {
+          const hindex = responseObj['xAxis'].indexOf((eventBySensor[i].weekVal));
+          if(hindex !==-1 && eventBySensor[i].movingAvg)
+            responseObj['ArrayEventValue'][hindex] = eventBySensor[i].movingAvg.avg;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveAverageSensorData', [connectionID, responseObj]);
+    }
+  }
+
+  /**
+   * @description This method will listen to the requestSensorEventsData emit from browser
+   * @param client
+   * @param message
+   */
+  @SubscribeMessage('requestSensorEventsData')
+  async requestSensorEventsData(client, message) {
+    // { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+    const duration = message.duration;
+    const sensorType = message.sensorType;
+    const edgeToken = message.edgeToken;
+    const endToken = message.endToken;
+    let endCond:any = {};
+    let endByEdge:any[] = [];
+    if(endToken && endToken!=""){
+      endCond = { deviceToken: { $eq: endToken } }
+    } else if(edgeToken && edgeToken!=""){
+      endByEdge = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(IdentityChain).distinct(
+        "data.token",
+        { "data.blSerialNumber": edgeToken } );
+      if(endByEdge.length>0){
+        endCond = { deviceToken: { $in: endByEdge } }
+      } else{
+        endCond = { deviceToken: { $eq: "--" } }
+      }
+    }
+    const DayArray = [0, 0, 0, 0, 0, 0, 0];
+    let weekArray = [];
+    let responseObj = {};
+    const tzString = message.timeZone;
+    const currentDate = new Date(); 
+
+    if (duration == 'hourly') {
+      const previousTimeStamp = (currentDate.getTime()) - ((GlobalVariables.HOURLY_DURATION) * 60 * 60 * 1000);
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEvent'] = JSON.parse(JSON.stringify(axisData[1]));
+      let allEvents: any
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } },
+                endCond
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $hour: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('error while getting event by duration for hourly', ex.message);
+          return false;
+        }
+      }
+
+      for (let i = 0; i < allEvents.length; i++) {
+        const hrs = allEvents[i].dateX; //(allEvents[i].dateX==0)?23:allEvents[i].dateX-1;
+        const hindex = responseObj['xAxis'].indexOf('' + hrs + ':00');
+        // const hindex = responseObj['xAxis'].indexOf('' + allEvents[i].dateX + ':00');
+        if (hindex !== -1) {
+          responseObj['ArrayEvent'][hindex] = (responseObj['ArrayEvent'][hindex] || responseObj['ArrayEvent'][hindex] == 0) ? responseObj['ArrayEvent'][hindex] + 1 : 1;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveSensorEventsData', [connectionID, responseObj]);
+    }
+    else if (duration == 'daily') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any;
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEvent'] = JSON.parse(JSON.stringify(axisData[1]));
+      const previousTime = new Date(previousTimeStamp)
+      const dteTime = '' + previousTime.getFullYear() + (previousTime.getMonth() + 1 > 9 ? previousTime.getMonth() : '0' + Number(previousTime.getMonth() + 1)) + (previousTime.getDate() > 9 ? previousTime.getDate() : '0' + previousTime.getDate());
+
+      const outputArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+      let allEventsHourlyData: any;
+      try {
+        allEventsHourlyData = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } },
+                endCond
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "dateX": { $dayOfWeek: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex) {
+          console.error('Error while getting sensor event data for hourly', ex.message);
+          return false;
+        }
+      }
+
+      for (let i = 0; i < allEventsHourlyData.length; i++) {
+        const hindex = responseObj['xAxis'].indexOf(outputArr[(allEventsHourlyData[i].dateX-1)]);
+        if (hindex !== -1) {
+          responseObj['ArrayEvent'][hindex] = (responseObj['ArrayEvent'][hindex] || responseObj['ArrayEvent'][hindex] == 0) ? responseObj['ArrayEvent'][hindex] + 1 : 0;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveSensorEventsData', [connectionID, responseObj]);
+    }
+    else if (duration == 'weekly') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any;
+
+      const prevDate = new Date(new Date(previousTimeStamp).toLocaleString("en-US", { timeZone: tzString }));
+      const axisData = this.getXAxis(prevDate, duration);
+      responseObj['xAxis'] = axisData[0];
+      responseObj['ArrayEvent'] = JSON.parse(JSON.stringify(axisData[1]));
+
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).aggregate([
+          {
+            $match: {
+              $and: [
+                { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+                { timeStamp: { $gt: previousTimeStamp / 1000 } },
+                endCond
+              ]
+            }
+          },
+          {
+            "$project": {
+              "timeStamp": 1,
+              "payload": 1,
+              "deviceToken": 1,
+              "dateX": { $week: { date: { $toDate: { $multiply: ["$timeStamp", 1000] } }, timezone: tzString } },
+            }
+          }
+        ]).toArray();
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting sensor event data for daily', ex.message);
+      }
+
+      for (let i = 0; i < allEvents.length; i++) {
+        const hindex = responseObj['xAxis'].indexOf(allEvents[i].dateX);
+        if (hindex !== -1) {
+          responseObj['ArrayEvent'][hindex] = (responseObj['ArrayEvent'][hindex] || responseObj['ArrayEvent'][hindex] == 0) ? responseObj['ArrayEvent'][hindex] + 1 : 0;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveSensorEventsData', [connectionID, responseObj]);
+    }
+    else if (duration == 'dailyBkp') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.WEEKLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({
+          $and: [
+            { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+            { timeStamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting sensor event data for daily', ex.message);
+      }
+      // const eventBySensor = allEvents.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      const eventBySensor = allEvents;
+
+      for (let i = 0; i < eventBySensor.length; i++) {
+        const hourValue = new Date(eventBySensor[i].timeStamp * 1000);
+        if (currentDate.getFullYear() == hourValue.getFullYear() && currentDate.getMonth() == hourValue.getMonth() && currentDate.getDate() >= hourValue.getDate() && (currentDate.getDate() - 7) < hourValue.getDate()) {
+          if (hourValue.getDay() == 1)
+            DayArray[0] = DayArray[0] + 1;
+          else if (hourValue.getDay() == 2)
+            DayArray[1] = DayArray[1] + 1;
+          else if (hourValue.getDay() == 3)
+            DayArray[2] = DayArray[2] + 1;
+          else if (hourValue.getDay() == 4)
+            DayArray[3] = DayArray[3] + 1;
+          else if (hourValue.getDay() == 5)
+            DayArray[4] = DayArray[4] + 1;
+          else if (hourValue.getDay() == 6)
+            DayArray[5] = DayArray[5] + 1;
+          else if (hourValue.getDay() == 7)
+            DayArray[6] = DayArray[6] + 1;
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveSensorEventsData', [connectionID, DayArray]);
+    }
+    else if (duration == 'weeklyBkp') {
+      const previousTimeStamp = (currentDate.getTime()) - (GlobalVariables.MONTHLY_DURATION * 60 * 60 * 1000);
+      let allEvents: any
+      try {
+        allEvents = await DB_CONNECTION[client.handshake.query.tenantName].getMongoRepository(CommunicationChain).find({
+          $and: [
+            { payload: { $regex: RegExp(`${sensorType + '#'}`, 'i') } },
+            { timeStamp: { $gt: previousTimeStamp / 1000 } }
+          ]
+        });
+      } catch (ex) {
+        if (ex)
+          console.error('Error while getting sensor event data for daily', ex.message);
+      }
+      // const eventBySensor = allEvents.filter(x => x.payload.toString().indexOf(sensorType) != -1);
+      const eventBySensor = allEvents;
+
+      const dayInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();//this.daysInMonth(currentDate.getMonth(), currentDate.getFullYear());
+      const date = new Date(currentDate.getFullYear() + '' + '-' + (currentDate.getMonth() + 1) + '' + '-' + dayInMonth + '');
+      const adjustedDate = date.getDate() + date.getDay();
+      const prefixes = ['0', '1', '2', '3', '4', '5'];
+      const weekNumber = parseInt(prefixes[0 | adjustedDate / 7]);
+      weekArray = [];
+      for (let i = 0; i < weekNumber; i++) {
+        weekArray.push(0);
+      }
+      for (let i = 0; i < eventBySensor.length; i++) {
+        const recordDate = new Date(eventBySensor[i].timeStamp * 1000);
+        if (recordDate.getFullYear() == date.getFullYear() && recordDate.getMonth() == date.getMonth() && recordDate.getDate() < date.getDate()) {
+          if (recordDate.getDate() > 0 && recordDate.getDate() <= 7) {
+            weekArray[0] = weekArray[0] + 1;
+          } else if (recordDate.getDate() > 7 && recordDate.getDate() <= 14) {
+            weekArray[1] = weekArray[1] + 1;
+          } else if (recordDate.getDate() > 14 && recordDate.getDate() <= 21) {
+            weekArray[2] = weekArray[2] + 1;
+          } else if (recordDate.getDate() > 21 && recordDate.getDate() <= 28) {
+            weekArray[3] = weekArray[3] + 1;
+          } else if (recordDate.getDate() > 28) {
+            weekArray[4] = weekArray[4] + 1;
+          }
+        }
+      }
+      const connectionID = client.handshake.query.socketConnectionId;
+      this.server.emit('receiveSensorEventsData', [connectionID, weekArray]);
+    }
+  }
+
+  /**
+   * @description This method will handle the disconnect
+   */
+  async handleDisconnect() {
+    console.log("Socket Disconected");
+    try {
+      // this.clientDB.close();
+      // DB_CONNECTION[client.handshake.query.tenantName].close();  
+    } catch (error) {
+      if (error)
+        console.log("Database connection did not closed.");
+    }
+  }
+
+  @SubscribeMessage('events')
+  async onChat(client, message) {
+    client.broadcast.emit('events', { "message": message });
+  }
+
+  /**
+   * 
+   * @param name 
+   * @description this method will generate db name as per the tenant name.
+   */
+  genrateDbName(name) {
+    const formated = name.split('/^[A-Z]([a-zA-Z0-9]|[- @\.#&!][\. ])*$/').join('');
+    name = formated.split(' ').join('');
+    name = name.split('.').join('');
+    return name;
+  }
+
+  /**
+   * 
+   * @param dbName 
+   * @description this method will create mongodb connection.
+   */
+  async createMongoDbConnection(dbName) {
+    const MongoClient = require('mongodb').MongoClient;
+    const url = `mongodb://127.0.0.1:27017/${dbName}`;
+    const client = await MongoClient.connect(url, {
+      useNewUrlParser: true,
+    }).catch(err => {
+      console.log(err);
+    });
+    if (!client) {
+      return;
+    }
+    return client;
+  }
+}
