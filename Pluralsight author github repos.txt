@@ -1,0 +1,40 @@
+Pluralsight author github repos:
+
+For React Redux:
+
+1)cory house
+2)samer buna
+3)peter kellner
+4)jake trent
+5)daniel stern
+6)liam mclennan
+7)hendrik swanepoel
+8)anthony alampi
+9)christian wenz
+10)mat warger
+
+
+For Angular:
+1)joe eames
+2)deborah kurata
+3)mark zamoyta
+4)john papa
+5)brian treese
+6)ajden towfeek
+7)jim cooper
+8)brian noyes
+9)duncan hunter
+10)brice wilson
+11)dan wahlin
+
+For NodeJs:
+1)Paul O'Fallon
+2)samer buna
+3)joe eames
+4)brian clark
+5)jonathan mills
+6)armen avanesi
+7)justin boyer
+8)nate taylor
+9)brice wilson
+10)
